@@ -20,7 +20,7 @@ Sign in once with the Grok CLI (`grok login`); OpenUsage reads the same `~/.grok
 
 ## The spend tiles
 
-Today / Yesterday / Last 30 Days are computed **locally** from the Grok CLI's log (`~/.grok/logs/unified.jsonl`, or `$GROK_HOME/logs/unified.jsonl`) — OpenUsage reads the log directly. Each period is one tile showing cost and tokens together (`$4.08 · 1.2M tokens`), the same as Claude/Codex/Cursor. The dollars are estimated from token counts at public API rates using the shared [model pricing](../pricing.md) (that's the ⓘ); the token counts themselves are measured, and these estimates are separate from the monthly credits the billing API reports. No log data leaves your Mac. A period with no recorded usage reads "No data" rather than a misleading `$0.00 · 0 tokens` — the same as every other spend-tracking provider.
+Today / Yesterday / Last 30 Days are computed **locally** from the Grok CLI's log (`~/.grok/logs/unified.jsonl`, or `$GROK_HOME/logs/unified.jsonl`) and xAI requests in Xal's prompt-free usage ledger (`~/.xal/usage/`, or `$XAL_HOME/usage/`). OpenUsage reads both directly and folds them into the same tiles and trend. Each period is one tile showing cost and tokens together (`$4.08 · 1.2M tokens`), the same as Claude/Codex/Cursor. The dollars are estimated from token counts at public API rates using the shared [model pricing](../pricing.md) (that's the ⓘ); the token counts themselves are measured, and these estimates are separate from the monthly credits the billing API reports. No log data leaves your Mac. A period with no recorded usage reads "No data" rather than a misleading `$0.00 · 0 tokens` — the same as every other spend-tracking provider.
 
 ## Troubleshooting
 

@@ -15,6 +15,7 @@ final class CodexProvider: ProviderRuntime {
     let authStore: CodexAuthStore
     let usageClient: CodexUsageClient
     let logUsageScanner: CodexLogUsageScanner
+    let xalUsageScanner: XalUsageScanner
     let now: @Sendable () -> Date
     let pricing: @Sendable () async -> ModelPricing
 
@@ -22,12 +23,14 @@ final class CodexProvider: ProviderRuntime {
         authStore: CodexAuthStore = CodexAuthStore(),
         usageClient: CodexUsageClient = CodexUsageClient(),
         logUsageScanner: CodexLogUsageScanner = CodexLogUsageScanner(),
+        xalUsageScanner: XalUsageScanner = .shared,
         now: @escaping @Sendable () -> Date = Date.init,
         pricing: @escaping @Sendable () async -> ModelPricing = { await ModelPricingStore.shared.current() }
     ) {
         self.authStore = authStore
         self.usageClient = usageClient
         self.logUsageScanner = logUsageScanner
+        self.xalUsageScanner = xalUsageScanner
         self.now = now
         self.pricing = pricing
     }
@@ -60,15 +63,15 @@ final class CodexProvider: ProviderRuntime {
     }
 
     func hasLocalCredentials() async -> Bool {
-        // Same sources as `refresh()`: auth.json candidates first, keychain as the fallback. Only a
-        // usable access token counts (see `hasUsableAccessToken`) — an API-key-only auth.json can't
-        // serve the usage API, so seeding it on would just show an error row.
+        // Same sources as `refresh()`: auth.json candidates first, keychain as the fallback, then Xal's
+        // local ledger for spend-only display. An API-key-only auth.json cannot serve the usage API.
         let fileCandidates = authStore.loadAuthCandidates()
         if fileCandidates.contains(where: \.hasUsableAccessToken) {
             return true
         }
         let keychain = await loadOffMainActor { [authStore] in authStore.loadKeychainAuth() }
-        return keychain?.hasUsableAccessToken == true
+        if keychain?.hasUsableAccessToken == true { return true }
+        return await xalUsageScanner.scan(cardID: provider.id, now: now(), pricing: .empty) != nil
     }
 
     func refresh() async -> ProviderSnapshot {
@@ -97,7 +100,41 @@ final class CodexProvider: ProviderRuntime {
         if let lastFallbackError {
             return ProviderSnapshot.error(provider: provider, error: lastFallbackError)
         }
+        if let snapshot = await xalOnlySnapshot() { return snapshot }
         return ProviderSnapshot.error(provider: provider, error: CodexAuthError.notLoggedIn)
+    }
+
+    private func xalOnlySnapshot() async -> ProviderSnapshot? {
+        let refreshedAt = now()
+        let pricing = await pricing()
+        guard let scan = await xalUsageScanner.scan(
+            cardID: provider.id,
+            now: refreshedAt,
+            pricing: pricing
+        ) else { return nil }
+        let note = "From Xal (estimated)"
+        var lines: [MetricLine] = []
+        SpendTileMapper.appendTokenUsage(
+            scan.series,
+            to: &lines,
+            now: refreshedAt,
+            unknownModelsByDay: scan.unknownModelsByDay,
+            modelUsage: scan.modelUsage,
+            modelSourceNote: note
+        )
+        SpendTileMapper.appendUsageTrend(scan.series, to: &lines, now: refreshedAt, note: note)
+        MetricLine.appendNoDataIfNeeded(&lines)
+        return ProviderSnapshot.make(
+            provider: provider,
+            plan: nil,
+            lines: lines,
+            refreshedAt: refreshedAt,
+            usageHistory: ProviderUsageHistory(
+                series: scan.series,
+                modelUsage: scan.modelUsage,
+                unknownModelsByDay: scan.unknownModelsByDay
+            )
+        )
     }
 
     private func probe(authState initialState: CodexAuthState) async throws -> ProviderSnapshot {
@@ -137,18 +174,20 @@ final class CodexProvider: ProviderRuntime {
         var mapped = try CodexUsageMapper.mapUsageResponse(response, resetCredits: resetCredits, now: now())
 
         // Local spend tiles, scanned natively from the Codex CLI's session rollouts and priced through
-        // the shared pricing store, merged with Codex usage that happened inside pi (attributed back
-        // here). Both scans run on their scanner actors, off the main actor.
+        // the shared pricing store, merged with Codex usage that happened inside pi or Xal and attributed
+        // back here. All scans run on their scanner actors, off the main actor.
         let pricing = await pricing()
         let nativeScan = await logUsageScanner.scan(now: now(), pricing: pricing)
         let piScan = await PiUsageScanner.shared.scan(cardID: provider.id, now: now(), pricing: pricing)
+        let xalScan = await xalUsageScanner.scan(cardID: provider.id, now: now(), pricing: pricing)
         var usageHistory: ProviderUsageHistory?
-        // Cancellation can land between the native and pi scans. Treat the pair as one unit so a
-        // partial result cannot replace the last-good combined history in WidgetDataStore.
-        if !Task.isCancelled, let scan = DailyUsageAccumulator.merged([nativeScan, piScan]) {
-            let note = piScan == nil
-                ? "From your Codex logs (estimated)"
-                : "From your Codex logs and pi (estimated)"
+        // Cancellation can land between the scans. Treat them as one unit so a partial result cannot
+        // replace the last-good combined history in WidgetDataStore.
+        if !Task.isCancelled, let scan = DailyUsageAccumulator.merged([nativeScan, piScan, xalScan]) {
+            var sources = ["your Codex logs"]
+            if piScan != nil { sources.append("pi") }
+            if xalScan != nil { sources.append("Xal") }
+            let note = "From \(sources.formatted(.list(type: .and))) (estimated)"
             usageHistory = ProviderUsageHistory(
                 series: scan.series,
                 modelUsage: scan.modelUsage,

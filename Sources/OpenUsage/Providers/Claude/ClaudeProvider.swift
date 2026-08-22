@@ -16,6 +16,7 @@ final class ClaudeProvider: ProviderRuntime {
     let authStore: ClaudeAuthStore
     let usageClient: ClaudeUsageClient
     let logUsageScanner: ClaudeLogUsageScanner
+    let xalUsageScanner: XalUsageScanner
     let now: @Sendable () -> Date
     let pricing: @Sendable () async -> ModelPricing
 
@@ -33,12 +34,14 @@ final class ClaudeProvider: ProviderRuntime {
         authStore: ClaudeAuthStore = ClaudeAuthStore(),
         usageClient: ClaudeUsageClient = ClaudeUsageClient(),
         logUsageScanner: ClaudeLogUsageScanner = ClaudeLogUsageScanner(),
+        xalUsageScanner: XalUsageScanner = .shared,
         now: @escaping @Sendable () -> Date = Date.init,
         pricing: @escaping @Sendable () async -> ModelPricing = { await ModelPricingStore.shared.current() }
     ) {
         self.authStore = authStore
         self.usageClient = usageClient
         self.logUsageScanner = logUsageScanner
+        self.xalUsageScanner = xalUsageScanner
         self.now = now
         self.pricing = pricing
     }
@@ -250,18 +253,20 @@ final class ClaudeProvider: ProviderRuntime {
         }
 
         // Local spend tiles, scanned natively from Claude Code's session logs and priced through the
-        // shared pricing store, merged with Claude usage that happened inside pi (attributed back here).
-        // Both scans run on their scanner actors, off the main actor.
+        // shared pricing store, merged with Claude usage that happened inside pi or Xal and attributed
+        // back here. All scans run on their scanner actors, off the main actor.
         let pricing = await pricing()
         let nativeScan = await logUsageScanner.scan(now: now(), pricing: pricing)
         let piScan = await PiUsageScanner.shared.scan(cardID: provider.id, now: now(), pricing: pricing)
+        let xalScan = await xalUsageScanner.scan(cardID: provider.id, now: now(), pricing: pricing)
         var usageHistory: ProviderUsageHistory?
-        // Cancellation can land between the native and pi scans. Treat the pair as one unit so a
-        // partial result cannot replace the last-good combined history in WidgetDataStore.
-        if !Task.isCancelled, let scan = DailyUsageAccumulator.merged([nativeScan, piScan]) {
-            let note = piScan == nil
-                ? "From your Claude usage history (estimated)"
-                : "From your Claude usage history and pi (estimated)"
+        // Cancellation can land between the scans. Treat them as one unit so a partial result cannot
+        // replace the last-good combined history in WidgetDataStore.
+        if !Task.isCancelled, let scan = DailyUsageAccumulator.merged([nativeScan, piScan, xalScan]) {
+            var sources = ["your Claude usage history"]
+            if piScan != nil { sources.append("pi") }
+            if xalScan != nil { sources.append("Xal") }
+            let note = "From \(sources.formatted(.list(type: .and))) (estimated)"
             usageHistory = ProviderUsageHistory(
                 series: scan.series,
                 modelUsage: scan.modelUsage,

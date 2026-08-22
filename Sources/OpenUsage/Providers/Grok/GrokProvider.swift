@@ -14,6 +14,7 @@ final class GrokProvider: ProviderRuntime {
     let authStore: GrokAuthStore
     let usageClient: GrokUsageClient
     let logUsageScanner: GrokLogUsageScanner
+    let xalUsageScanner: XalUsageScanner
     let now: @Sendable () -> Date
     let pricing: @Sendable () async -> ModelPricing
 
@@ -21,12 +22,14 @@ final class GrokProvider: ProviderRuntime {
         authStore: GrokAuthStore = GrokAuthStore(),
         usageClient: GrokUsageClient = GrokUsageClient(),
         logUsageScanner: GrokLogUsageScanner = GrokLogUsageScanner(),
+        xalUsageScanner: XalUsageScanner = .shared,
         now: @escaping @Sendable () -> Date = Date.init,
         pricing: @escaping @Sendable () async -> ModelPricing = { await ModelPricingStore.shared.current() }
     ) {
         self.authStore = authStore
         self.usageClient = usageClient
         self.logUsageScanner = logUsageScanner
+        self.xalUsageScanner = xalUsageScanner
         self.now = now
         self.pricing = pricing
     }
@@ -93,10 +96,16 @@ final class GrokProvider: ProviderRuntime {
 
         let plan = await fetchPlanName(accessToken: state.token)
 
-        // Local spend tiles, read natively from the Grok CLI log and priced via the shared pricing
-        // store. `scan` is awaited so its whole-file read + parse runs off the main actor.
+        // Local spend tiles combine the Grok CLI log with xAI usage from Xal. Both are priced through
+        // the shared store and scanned off the main actor.
+        let pricing = await pricing()
+        let nativeScan = await logUsageScanner.scan(daysBack: 30, now: now(), pricing: pricing)
+        let xalScan = await xalUsageScanner.scan(cardID: provider.id, now: now(), pricing: pricing)
         var usageHistory: ProviderUsageHistory?
-        if let scan = await logUsageScanner.scan(daysBack: 30, now: now(), pricing: await pricing()) {
+        if !Task.isCancelled, let scan = DailyUsageAccumulator.merged([nativeScan, xalScan]) {
+            let note = xalScan == nil
+                ? "From your Grok logs (estimated)"
+                : "From your Grok logs and Xal (estimated)"
             usageHistory = ProviderUsageHistory(
                 series: scan.series,
                 modelUsage: scan.modelUsage,
@@ -108,10 +117,9 @@ final class GrokProvider: ProviderRuntime {
                 now: now(),
                 unknownModelsByDay: scan.unknownModelsByDay,
                 modelUsage: scan.modelUsage,
-                modelSourceNote: "From your Grok logs (estimated)"
+                modelSourceNote: note
             )
-            SpendTileMapper.appendUsageTrend(scan.series, to: &mapped.lines, now: now(),
-                                             note: "From your Grok logs (estimated)")
+            SpendTileMapper.appendUsageTrend(scan.series, to: &mapped.lines, now: now(), note: note)
         }
 
         return ProviderSnapshot.make(

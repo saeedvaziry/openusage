@@ -703,6 +703,68 @@ final class CodexProviderTests: XCTestCase {
         })
     }
 
+    func testXalLedgerProvidesSpendWithoutCodexCredentials() async throws {
+        let now = Date()
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("openusage-xal-codex-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let usage = home.appendingPathComponent("usage", isDirectory: true)
+        try FileManager.default.createDirectory(at: usage, withIntermediateDirectories: true)
+        let record: [String: Any] = [
+            "type": "provider_usage",
+            "version": 1,
+            "id": "request-id",
+            "timestamp": OpenUsageISO8601.string(from: now.addingTimeInterval(-60)),
+            "provider": "openai-chatgpt",
+            "model": "gpt-5.2",
+            "phase": "turn",
+            "outcome": "completed",
+            "usage": [
+                "totalInputTokens": 100,
+                "cacheReadInputTokens": 0,
+                "cacheWriteInputTokens": 0,
+                "outputTokens": 50
+            ]
+        ]
+        try JSONSerialization.data(withJSONObject: record).write(to: usage.appendingPathComponent("run.jsonl"))
+        let xalScanner = XalUsageScanner(
+            environment: FakeEnvironment(["XAL_HOME": home.path]),
+            incrementalScanner: IncrementalJSONLScanner<XalUsageScanner.Entry>()
+        )
+        let provider = CodexProvider(
+            authStore: CodexAuthStore(
+                environment: FakeEnvironment(),
+                files: FakeFiles(),
+                keychain: FakeKeychain()
+            ),
+            xalUsageScanner: xalScanner,
+            now: { now },
+            pricing: {
+                ModelPricing(
+                    supplement: PricingSupplement(),
+                    primary: PricingCatalog(entries: ["gpt-5.2": ModelRates(
+                        inputPerMillion: 1000,
+                        outputPerMillion: 3000,
+                        cacheWritePerMillion: 1000,
+                        cacheReadPerMillion: 100
+                    )]),
+                    secondary: PricingCatalog(entries: [:])
+                )
+            }
+        )
+
+        let detected = await provider.hasLocalCredentials()
+        let snapshot = await provider.refresh()
+
+        XCTAssertTrue(detected)
+        XCTAssertNil(snapshot.errorCategory)
+        XCTAssertEqual(values(snapshot.lines, "Today"), [
+            MetricValue(number: 0.25, kind: .dollars, estimated: true),
+            MetricValue(number: 150, kind: .count, label: "tokens")
+        ])
+        XCTAssertEqual(snapshot.usageHistory?.series.daily.first?.totalTokens, 150)
+    }
+
     private func values(_ lines: [MetricLine], _ label: String) -> [MetricValue]? {
         guard case .values(_, let values, _, _, _, _) = lines.first(where: { $0.label == label }) else {
             return nil

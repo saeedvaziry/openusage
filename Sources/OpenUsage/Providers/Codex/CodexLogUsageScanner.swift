@@ -471,7 +471,7 @@ actor CodexLogUsageScanner {
     /// `unknownModelsByDay` (the tile's warning triangle), the only place unpriceable usage surfaces.
     /// A blank slug is unattributed, not unknown — there is no name to warn about.
     static func aggregate(
-        events: [Event], since: Date, pricing: ModelPricing
+        events: [Event], since: Date, pricing: ModelPricing, deduplicateEvents: Bool = true
     ) -> LogUsageScan {
         var seen: Set<EventKey> = []
         var accumulator = DailyUsageAccumulator()
@@ -481,7 +481,7 @@ actor CodexLogUsageScanner {
                 timestamp: event.timestamp, model: event.model, pricingModel: event.pricingModel, input: event.input,
                 cached: event.cached, output: event.output, reasoning: event.reasoning, total: event.total
             )
-            guard seen.insert(key).inserted else { continue }
+            if deduplicateEvents, !seen.insert(key).inserted { continue }
 
             let day = DailyUsageAccumulator.dayKey(from: event.timestamp)
             // One trimmed slug for pricing, the unknown-model warning, and the breakdown key alike —
